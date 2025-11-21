@@ -1,0 +1,10 @@
+[project]
+name = "obd2-reader"
+version = "0.1.0"
+description = "GUI application for reading live OBD2 data using ELM327 adapters"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "pyserial>=3.5",
+    "pyqt6>=6.6.0",
+]
