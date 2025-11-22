@@ -6,6 +6,13 @@ import threading
 import time
 from typing import Optional, Callable, List
 
+# ============================================================================
+# DEBUG MODE
+# Set DEBUG = True to enable detailed print statements to the terminal
+# Set DEBUG = False to disable all terminal output (default)
+# ============================================================================
+DEBUG = False
+
 
 class OBD2Interface:
     """Interface for ELM327 OBD2 adapter communication."""
@@ -61,7 +68,8 @@ class OBD2Interface:
             return True
 
         except Exception as e:
-            print(f"Failed to connect: {e}")
+            if DEBUG:
+                print(f"Failed to connect: {e}")
             if self.serial_port and self.serial_port.is_open:
                 self.serial_port.close()
             return False
@@ -90,7 +98,8 @@ class OBD2Interface:
             Response from adapter
         """
         if not self.serial_port or not self.serial_port.is_open:
-            print(f"[OBD2] Cannot send '{command}' - port not open")
+            if DEBUG:
+                print(f"[OBD2] Cannot send '{command}' - port not open")
             return ""
 
         try:
@@ -98,7 +107,8 @@ class OBD2Interface:
             self.serial_port.reset_input_buffer()
 
             # Send command
-            print(f"[OBD2] Sending: {command}")
+            if DEBUG:
+                print(f"[OBD2] Sending: {command}")
             self.serial_port.write((command + "\r").encode())
 
             # Read response
@@ -115,11 +125,13 @@ class OBD2Interface:
                 time.sleep(0.01)
 
             elapsed = time.time() - start_time
-            print(f"[OBD2] Received ({elapsed:.2f}s): {repr(response.strip())}")
+            if DEBUG:
+                print(f"[OBD2] Received ({elapsed:.2f}s): {repr(response.strip())}")
             return response.strip()
 
         except Exception as e:
-            print(f"[OBD2] Command error: {e}")
+            if DEBUG:
+                print(f"[OBD2] Command error: {e}")
             return ""
 
     def query_pid(self, mode: str, pid: str) -> Optional[str]:
@@ -177,13 +189,14 @@ class OBD2Interface:
                 # Small delay between queries
                 time.sleep(0.05)
 
-    def scan_supported_pids(self, services: List[str] = None) -> List[str]:
+    def scan_supported_pids(self, services: List[str] = None, progress_callback: Optional[Callable[[str], None]] = None) -> List[str]:
         """
         Scan the vehicle for all supported PIDs across specified services.
 
         Args:
             services: List of service modes to scan (e.g., ["01", "02", "09"]).
                      If None, scans Service 01 only for backwards compatibility.
+            progress_callback: Optional callback function for progress updates.
 
         Queries PIDs 00, 20, 40, 60, 80, A0, C0, E0 which return bitmaps
         indicating which PIDs in their respective ranges are supported.
@@ -194,7 +207,11 @@ class OBD2Interface:
         if services is None:
             services = ["01"]
 
-        print(f"\n=== Starting PID Scan for Services: {', '.join(services)} ===")
+        if DEBUG:
+            print(f"\n=== Starting PID Scan for Services: {', '.join(services)} ===")
+        if progress_callback:
+            progress_callback(f"Starting PID Scan for Services: {', '.join(services)}")
+
         supported_pids = []
 
         # Support PIDs follow a pattern: 00, 20, 40, 60, 80, A0, C0, E0
@@ -202,16 +219,30 @@ class OBD2Interface:
         support_pids = ["00", "20", "40", "60", "80", "A0", "C0", "E0"]
 
         for service in services:
-            print(f"\n--- Scanning Service {service} ---")
+            if DEBUG:
+                print(f"\n--- Scanning Service {service} ---")
+            if progress_callback:
+                progress_callback(f"Scanning Service {service}...")
+
             for support_pid in support_pids:
-                print(f"\nQuerying support PID {service}{support_pid}...")
+                if DEBUG:
+                    print(f"\nQuerying support PID {service}{support_pid}...")
+                if progress_callback:
+                    progress_callback(f"Querying PID {service}{support_pid}...")
+
                 response = self.query_pid(service, support_pid)
 
                 if not response:
-                    print(f"  No response for PID {service}{support_pid} - stopping scan for this service")
+                    if DEBUG:
+                        print(f"  No response for PID {service}{support_pid} - stopping scan for this service")
+                    if progress_callback:
+                        progress_callback(f"No response for PID {service}{support_pid}")
                     break
 
-                print(f"  Response: {response}")
+                if DEBUG:
+                    print(f"  Response: {response}")
+                if progress_callback:
+                    progress_callback(f"Response: {response}")
 
                 # Parse the response to extract supported PIDs
                 try:
@@ -227,7 +258,8 @@ class OBD2Interface:
                         for byte_str in data_bytes:
                             bitmap = (bitmap << 8) | int(byte_str, 16)
 
-                        print(f"  Bitmap: 0x{bitmap:08X}")
+                        if DEBUG:
+                            print(f"  Bitmap: 0x{bitmap:08X}")
 
                         # Calculate the starting PID number for this range
                         base_pid = int(support_pid, 16) + 1
@@ -241,15 +273,24 @@ class OBD2Interface:
                                 supported_pids.append(pid_id)
                                 pids_in_range.append(pid_id)
 
-                        print(f"  Found {len(pids_in_range)} PIDs: {', '.join(pids_in_range)}")
+                        if DEBUG:
+                            print(f"  Found {len(pids_in_range)} PIDs: {', '.join(pids_in_range)}")
+                        if progress_callback:
+                            progress_callback(f"Found {len(pids_in_range)} PIDs: {', '.join(pids_in_range)}")
                     else:
-                        expected_len = len(parts)
-                        print(f"  Invalid response format (expected {expected_response} XX ... with 6+ parts, got {expected_len} parts)")
+                        if DEBUG:
+                            expected_len = len(parts)
+                            print(f"  Invalid response format (expected {expected_response} XX ... with 6+ parts, got {expected_len} parts)")
 
                 except (ValueError, IndexError) as e:
-                    print(f"  Error parsing support PID {support_pid}: {e}")
+                    if DEBUG:
+                        print(f"  Error parsing support PID {support_pid}: {e}")
                     continue
 
-        print(f"\n=== Scan Complete: Found {len(supported_pids)} total PIDs ===")
-        print(f"Supported PIDs: {', '.join(supported_pids)}\n")
+        if DEBUG:
+            print(f"\n=== Scan Complete: Found {len(supported_pids)} total PIDs ===")
+            print(f"Supported PIDs: {', '.join(supported_pids)}\n")
+        if progress_callback:
+            progress_callback(f"Scan Complete: Found {len(supported_pids)} total PIDs")
+
         return supported_pids

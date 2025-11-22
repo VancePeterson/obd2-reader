@@ -23,6 +23,20 @@ python main.py
 uv sync
 ```
 
+### Debug Mode
+```bash
+# Enable debug output to terminal
+# Edit obd2_reader/gui.py and obd2_reader/obd2_interface.py
+# Change: DEBUG = False
+# To:     DEBUG = True
+
+# This will enable detailed print statements showing:
+# - Serial communication (commands sent/received)
+# - PID scanning progress
+# - Data processing and graphing
+# - Connection state changes
+```
+
 ## Architecture
 
 ### Three-Layer Architecture
