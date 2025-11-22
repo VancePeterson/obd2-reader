@@ -90,6 +90,7 @@ class OBD2Interface:
             Response from adapter
         """
         if not self.serial_port or not self.serial_port.is_open:
+            print(f"[OBD2] Cannot send '{command}' - port not open")
             return ""
 
         try:
@@ -97,12 +98,15 @@ class OBD2Interface:
             self.serial_port.reset_input_buffer()
 
             # Send command
+            print(f"[OBD2] Sending: {command}")
             self.serial_port.write((command + "\r").encode())
 
             # Read response
             response = ""
             start_time = time.time()
-            while time.time() - start_time < 1:  # 1 second timeout
+            timeout = 5.0  # 5 second timeout to handle SEARCHING...
+
+            while time.time() - start_time < timeout:
                 if self.serial_port.in_waiting > 0:
                     chunk = self.serial_port.read(self.serial_port.in_waiting).decode('utf-8', errors='ignore')
                     response += chunk
@@ -110,10 +114,12 @@ class OBD2Interface:
                         break
                 time.sleep(0.01)
 
+            elapsed = time.time() - start_time
+            print(f"[OBD2] Received ({elapsed:.2f}s): {repr(response.strip())}")
             return response.strip()
 
         except Exception as e:
-            print(f"Command error: {e}")
+            print(f"[OBD2] Command error: {e}")
             return ""
 
     def query_pid(self, mode: str, pid: str) -> Optional[str]:
@@ -130,8 +136,10 @@ class OBD2Interface:
         command = f"{mode}{pid}"
         response = self._send_command(command)
 
-        # Parse response (remove echo, prompt, and whitespace)
-        response = response.replace(command, "").replace(">", "").strip()
+        # Parse response (remove echo, prompt, SEARCHING..., and whitespace)
+        response = response.replace(command, "").replace(">", "").replace("SEARCHING...", "").strip()
+        # Remove any line breaks and extra spaces
+        response = " ".join(response.split())
 
         if response and "NO DATA" not in response and "ERROR" not in response:
             return response
@@ -168,3 +176,80 @@ class OBD2Interface:
 
                 # Small delay between queries
                 time.sleep(0.05)
+
+    def scan_supported_pids(self, services: List[str] = None) -> List[str]:
+        """
+        Scan the vehicle for all supported PIDs across specified services.
+
+        Args:
+            services: List of service modes to scan (e.g., ["01", "02", "09"]).
+                     If None, scans Service 01 only for backwards compatibility.
+
+        Queries PIDs 00, 20, 40, 60, 80, A0, C0, E0 which return bitmaps
+        indicating which PIDs in their respective ranges are supported.
+
+        Returns:
+            List of supported PID IDs in format "MMXX" (e.g., ["010C", "020D", "0902"])
+        """
+        if services is None:
+            services = ["01"]
+
+        print(f"\n=== Starting PID Scan for Services: {', '.join(services)} ===")
+        supported_pids = []
+
+        # Support PIDs follow a pattern: 00, 20, 40, 60, 80, A0, C0, E0
+        # Each returns a 4-byte bitmap for PIDs 01-20, 21-40, 41-60, etc.
+        support_pids = ["00", "20", "40", "60", "80", "A0", "C0", "E0"]
+
+        for service in services:
+            print(f"\n--- Scanning Service {service} ---")
+            for support_pid in support_pids:
+                print(f"\nQuerying support PID {service}{support_pid}...")
+                response = self.query_pid(service, support_pid)
+
+                if not response:
+                    print(f"  No response for PID {service}{support_pid} - stopping scan for this service")
+                    break
+
+                print(f"  Response: {response}")
+
+                # Parse the response to extract supported PIDs
+                try:
+                    # Response format: "4X XX A B C D" where 4X is service response (41, 42, 49, etc.)
+                    parts = response.split()
+                    # Response code should be (0x40 + service_mode)
+                    expected_response = f"{int(service, 16) + 0x40:02X}"
+
+                    if len(parts) >= 6 and parts[0] == expected_response:
+                        # Combine the 4 data bytes into a 32-bit bitmap
+                        data_bytes = parts[2:6]
+                        bitmap = 0
+                        for byte_str in data_bytes:
+                            bitmap = (bitmap << 8) | int(byte_str, 16)
+
+                        print(f"  Bitmap: 0x{bitmap:08X}")
+
+                        # Calculate the starting PID number for this range
+                        base_pid = int(support_pid, 16) + 1
+
+                        # Check each bit (bit 31 = PID base+0, bit 30 = PID base+1, etc.)
+                        pids_in_range = []
+                        for bit_pos in range(32):
+                            if bitmap & (1 << (31 - bit_pos)):
+                                pid_num = base_pid + bit_pos
+                                pid_id = f"{service}{pid_num:02X}"
+                                supported_pids.append(pid_id)
+                                pids_in_range.append(pid_id)
+
+                        print(f"  Found {len(pids_in_range)} PIDs: {', '.join(pids_in_range)}")
+                    else:
+                        expected_len = len(parts)
+                        print(f"  Invalid response format (expected {expected_response} XX ... with 6+ parts, got {expected_len} parts)")
+
+                except (ValueError, IndexError) as e:
+                    print(f"  Error parsing support PID {support_pid}: {e}")
+                    continue
+
+        print(f"\n=== Scan Complete: Found {len(supported_pids)} total PIDs ===")
+        print(f"Supported PIDs: {', '.join(supported_pids)}\n")
+        return supported_pids

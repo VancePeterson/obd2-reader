@@ -37,6 +37,7 @@ class MainWindow(QMainWindow):
         self.selected_pid_ids: Set[str] = set()
         self.pid_metadata: Dict[str, PIDMetadata] = {}
         self.all_pids = list(get_all_pids().values())
+        self.supported_pid_ids: Optional[Set[str]] = None  # None = show all, Set = show only supported
 
         self.init_ui()
         self.setup_connections()
@@ -116,6 +117,12 @@ class MainWindow(QMainWindow):
         self.connect_button.clicked.connect(self.toggle_connection)
         layout.addWidget(self.connect_button)
 
+        # Scan Vehicle button
+        self.scan_button = QPushButton("Scan Vehicle")
+        self.scan_button.clicked.connect(self.scan_vehicle)
+        self.scan_button.setEnabled(False)  # Disabled until connected
+        layout.addWidget(self.scan_button)
+
         group.setLayout(layout)
         return group
 
@@ -135,7 +142,7 @@ class MainWindow(QMainWindow):
 
         self.pid_tree = QTreeWidget()
         self.pid_tree.setHeaderLabels(["PID", "Description"])
-        self.pid_tree.setColumnWidth(0, 100)
+        self.pid_tree.setColumnWidth(0, 130)
         self.pid_tree.itemChanged.connect(self.on_pid_selection_changed)
         layout.addWidget(self.pid_tree)
 
@@ -197,7 +204,7 @@ class MainWindow(QMainWindow):
         self.filter_pids()
 
     def filter_pids(self):
-        """Filter the PID tree based on search text."""
+        """Filter the PID tree based on search text and supported PIDs."""
         search_text = self.search_box.text().lower() if hasattr(self, 'search_box') else ""
 
         # Temporarily disconnect the itemChanged signal
@@ -214,6 +221,10 @@ class MainWindow(QMainWindow):
 
         # Add PIDs under the category
         for pid_def in sorted(service_01_pids, key=lambda p: p.pid):
+            # Filter by supported PIDs (if scan has been performed)
+            if self.supported_pid_ids is not None and pid_def.full_id not in self.supported_pid_ids:
+                continue
+
             # Filter by PID ID or name
             pid_id_str = pid_def.full_id.lower()
             pid_name = pid_def.name.lower()
@@ -266,8 +277,43 @@ class MainWindow(QMainWindow):
 
         if item.checkState(0) == Qt.CheckState.Checked:
             self.selected_pid_ids.add(pid_id)
+            print(f"[GUI] PID {pid_id} selected")
         else:
             self.selected_pid_ids.discard(pid_id)
+            print(f"[GUI] PID {pid_id} deselected")
+
+        # If already connected, restart monitoring with updated PID list
+        if self.obd2_interface.is_connected:
+            print("[GUI] Already connected - restarting monitoring with updated PID list")
+            self.restart_monitoring()
+
+    def restart_monitoring(self):
+        """Restart monitoring with the current selected PIDs."""
+        # Stop current monitoring
+        if self.obd2_interface.running:
+            print("[GUI] Stopping current monitoring...")
+            self.obd2_interface.running = False
+            if self.obd2_interface.receive_thread:
+                self.obd2_interface.receive_thread.join(timeout=1)
+
+        # Build list of PIDs to monitor
+        pids_to_monitor = []
+        for pid_id in self.selected_pid_ids:
+            pid_def = get_pid_by_id(pid_id)
+            if pid_def:
+                pids_to_monitor.append((pid_def.mode, pid_def.pid, pid_def.name))
+
+        # Start monitoring if we have PIDs selected
+        if pids_to_monitor:
+            print(f"[GUI] Starting monitoring for {len(pids_to_monitor)} PIDs")
+            self.obd2_interface.start_receiving(self.obd2_data_callback, pids_to_monitor)
+            if not self.update_timer.isActive():
+                self.update_timer.start()
+            self.statusBar().showMessage(f"Monitoring {len(pids_to_monitor)} PIDs")
+        else:
+            print("[GUI] No PIDs selected - stopping monitoring")
+            self.update_timer.stop()
+            self.statusBar().showMessage("Connected - No PIDs selected for monitoring")
 
     def toggle_connection(self):
         """Connect or disconnect from OBD2 adapter."""
@@ -284,6 +330,7 @@ class MainWindow(QMainWindow):
                 self.connect_button.setText("Disconnect")
                 self.port_combo.setEnabled(False)
                 self.baudrate_combo.setEnabled(False)
+                self.scan_button.setEnabled(True)
 
                 # Build list of PIDs to monitor
                 pids_to_monitor = []
@@ -306,7 +353,60 @@ class MainWindow(QMainWindow):
             self.connect_button.setText("Connect")
             self.port_combo.setEnabled(True)
             self.baudrate_combo.setEnabled(True)
+            self.scan_button.setEnabled(False)
             self.statusBar().showMessage("Disconnected")
+
+    def scan_vehicle(self):
+        """Scan the vehicle for supported PIDs and filter the PID list."""
+        print("\n[GUI] Scan Vehicle button clicked")
+
+        if not self.obd2_interface.is_connected:
+            print("[GUI] Not connected - aborting scan")
+            self.statusBar().showMessage("Must be connected to scan vehicle")
+            return
+
+        print("[GUI] Connection verified, starting scan...")
+
+        # Disable scan button during scan
+        self.scan_button.setEnabled(False)
+        self.statusBar().showMessage("Scanning vehicle for supported PIDs...")
+
+        try:
+            # Perform scan for Services 01, 02, and 09
+            # Service 01 = Current data, Service 02 = Freeze frame, Service 09 = Vehicle info
+            services_to_scan = ["01", "02", "09"]
+            print(f"[GUI] Calling scan_supported_pids() for services {services_to_scan}...")
+            supported_pids = self.obd2_interface.scan_supported_pids(services=services_to_scan)
+            print(f"[GUI] Scan returned {len(supported_pids)} PIDs")
+
+            if supported_pids:
+                # Store supported PIDs
+                self.supported_pid_ids = set(supported_pids)
+                print(f"[GUI] Stored {len(self.supported_pid_ids)} supported PIDs")
+
+                # Rebuild PID tree with filtered list
+                print("[GUI] Rebuilding PID tree...")
+                self.filter_pids()
+
+                msg = f"Scan complete - Found {len(supported_pids)} supported PIDs"
+                print(f"[GUI] {msg}")
+                self.statusBar().showMessage(msg)
+            else:
+                msg = "Scan failed - No supported PIDs found"
+                print(f"[GUI] {msg}")
+                self.statusBar().showMessage(msg)
+
+        except Exception as e:
+            msg = f"Scan error: {e}"
+            print(f"[GUI] {msg}")
+            import traceback
+            traceback.print_exc()
+            self.statusBar().showMessage(msg)
+
+        finally:
+            # Re-enable scan button
+            print("[GUI] Re-enabling scan button")
+            self.scan_button.setEnabled(True)
 
     def obd2_data_callback(self, pid_id: str, raw_data: str):
         """Callback for received OBD2 data (called from OBD2 thread)."""
